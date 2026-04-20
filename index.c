@@ -15,6 +15,7 @@
 // PROVIDED functions: index_find, index_remove, index_status
 // TODO functions:     index_load, index_save, index_add
 // index.c — Staging area implementation
+// index.c — Staging area implementation
 #include "index.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -117,9 +118,9 @@ int index_status(const Index *index) {
 // ─── IMPLEMENTED ─────────────────────────────────────────────────────────────
 
 int index_load(Index *index) {
-    index->count = 0;
+    index->count = 0;  // always initialize first
     FILE *f = fopen(INDEX_FILE, "r");
-    if (!f) return 0;  // No index file yet — not an error
+    if (!f) return 0;  // no index yet — not an error
 
     char line[700];
     while (fgets(line, sizeof(line), f)) {
@@ -151,12 +152,10 @@ static int cmp_entries_by_path(const void *a, const void *b) {
 }
 
 int index_save(const Index *index) {
-    // Sort a mutable copy
     Index sorted = *index;
     qsort(sorted.entries, sorted.count,
           sizeof(IndexEntry), cmp_entries_by_path);
 
-    // Write to temp file
     char tmp_path[256];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", INDEX_FILE);
 
@@ -176,7 +175,6 @@ int index_save(const Index *index) {
     fflush(f);
     fsync(fileno(f));
     fclose(f);
-
     return rename(tmp_path, INDEX_FILE);
 }
 
@@ -222,4 +220,44 @@ int index_add(Index *index, const char *path) {
     e->size      = (uint32_t)st.st_size;
 
     return index_save(index);
+}
+
+// ─── COMMAND HANDLERS ────────────────────────────────────────────────────────
+
+void cmd_init(void) {
+    mkdir(PES_DIR,     0755);
+    mkdir(OBJECTS_DIR, 0755);
+    mkdir(REFS_DIR,    0755);
+
+    // Create HEAD pointing to main branch
+    FILE *f = fopen(HEAD_FILE, "w");
+    if (f) {
+        fprintf(f, "ref: refs/heads/main\n");
+        fclose(f);
+    }
+    printf("Initialized empty PES repository in .pes/\n");
+}
+
+void cmd_add(int argc, char *argv[]) {
+    if (argc < 3) {
+        fprintf(stderr, "Usage: pes add <file>...\n");
+        return;
+    }
+
+    Index index;
+    memset(&index, 0, sizeof(index));
+    index_load(&index);
+
+    for (int i = 2; i < argc; i++) {
+        if (index_add(&index, argv[i]) != 0) {
+            fprintf(stderr, "error: failed to add '%s'\n", argv[i]);
+        }
+    }
+}
+
+void cmd_status(void) {
+    Index index;
+    memset(&index, 0, sizeof(index));
+    index_load(&index);
+    index_status(&index);
 }
