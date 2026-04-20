@@ -114,21 +114,87 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
     return 0;
 }
 
-// ─── TODO: Implement these ──────────────────────────────────────────────────
+// Helper: recursively build tree for entries sharing a common prefix
+// entries: array of IndexEntry pointers, count: number of them
+// prefix: the directory prefix we've stripped (e.g. "src/"), depth for naming
+static int write_tree_level(IndexEntry **entries, int count,
+                             const char *prefix, ObjectID *id_out) {
+    Tree tree;
+    tree.count = 0;
 
-// Build a tree hierarchy from the current index and write all tree
-// objects to the object store.
-//
-// HINTS - Useful functions and concepts for this phase:
-//   - index_load      : load the staged files into memory
-//   - strchr          : find the first '/' in a path to separate directories from files
-//   - strncmp         : compare prefixes to group files belonging to the same subdirectory
-//   - Recursion       : you will likely want to create a recursive helper function 
-//                       (e.g., `write_tree_level(entries, count, depth)`) to handle nested dirs.
-//   - tree_serialize  : convert your populated Tree struct into a binary buffer
-//   - object_write    : save that binary buffer to the store as OBJ_TREE
-//
-// Returns 0 on success, -1 on error.
+    int i = 0;
+    while (i < count) {
+        const char *rel = entries[i]->path + strlen(prefix); // path relative to current dir
+        const char *slash = strchr(rel, '/');
+
+        if (!slash) {
+            // It's a file in this directory — add blob entry
+            TreeEntry *te = &tree.entries[tree.count++];
+            te->mode = entries[i]->mode;
+            strncpy(te->name, rel, sizeof(te->name) - 1);
+            te->hash = entries[i]->hash;
+            i++;
+        } else {
+            // It's a subdirectory — gather all entries with same first component
+            size_t dir_name_len = slash - rel;
+            char dir_name[256];
+            strncpy(dir_name, rel, dir_name_len);
+            dir_name[dir_name_len] = '\0';
+
+            // Build the new prefix for the subdirectory
+            char new_prefix[512];
+            snprintf(new_prefix, sizeof(new_prefix), "%s%s/", prefix, dir_name);
+
+            // Collect all entries in this subdirectory
+            int j = i;
+            while (j < count && strncmp(entries[j]->path + strlen(prefix),
+                                         dir_name, dir_name_len) == 0 &&
+                   entries[j]->path[strlen(prefix) + dir_name_len] == '/') {
+                j++;
+            }
+
+            // Recurse
+            ObjectID sub_id;
+            if (write_tree_level(entries + i, j - i, new_prefix, &sub_id) != 0)
+                return -1;
+
+            TreeEntry *te = &tree.entries[tree.count++];
+            te->mode = 0040000;
+            strncpy(te->name, dir_name, sizeof(te->name) - 1);
+            te->hash = sub_id;
+
+            i = j;
+        }
+    }
+
+    // Serialize and write this tree level
+    void *tdata;
+    size_t tlen;
+    if (tree_serialize(&tree, &tdata, &tlen) != 0) return -1;
+    int rc = object_write(OBJ_TREE, tdata, tlen, id_out);
+    free(tdata);
+    return rc;
+}
+
+// Comparison for qsort of IndexEntry pointers by path
+static int cmp_index_entry_ptrs(const void *a, const void *b) {
+    return strcmp((*(IndexEntry**)a)->path, (*(IndexEntry**)b)->path);
+}
+
+int tree_from_index(ObjectID *id_out) {
+    Index index;
+    index.count = 0;
+    if (index_load(&index) != 0 && index.count == 0) {
+        // Empty index is OK for first commit — write empty tree
+    }
+
+    // Sort entries by path
+    IndexEntry *ptrs[MAX_INDEX_ENTRIES];
+    for (int i = 0; i < index.count; i++) ptrs[i] = &index.entries[i];
+    qsort(ptrs, index.count, sizeof(IndexEntry*), cmp_index_entry_ptrs);
+
+    return write_tree_level(ptrs, index.count, "", id_out);
+}
 int tree_from_index(ObjectID *id_out) {
     // TODO: Implement recursive tree building
     // (See Lab Appendix for logical steps)
