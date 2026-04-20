@@ -14,7 +14,6 @@
 // PROVIDED functions: commit_parse, commit_serialize, commit_walk, head_read, head_update
 // TODO functions:     commit_create
 
-// commit.c — Commit creation and history traversal
 #include "commit.h"
 #include "index.h"
 #include "tree.h"
@@ -68,7 +67,14 @@ int commit_parse(const void *data, size_t len, Commit *commit_out) {
     p = strchr(p, '\n') + 1;  // skip committer line
     p = strchr(p, '\n') + 1;  // skip blank line
 
-    snprintf(commit_out->message, sizeof(commit_out->message), "%s", p);
+    size_t remaining = (const char *)data + len - p;
+
+    if (remaining >= sizeof(commit_out->message)) {
+        remaining = sizeof(commit_out->message) - 1;
+    }
+
+    memcpy(commit_out->message, p, remaining);
+    commit_out->message[remaining] = '\0';
     return 0;
 }
 
@@ -165,18 +171,18 @@ int head_update(const ObjectID *new_commit) {
 
     char tmp_path[528];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target_path);
-    
+
     f = fopen(tmp_path, "w");
     if (!f) return -1;
-    
+
     char hex[HASH_HEX_SIZE + 1];
     hash_to_hex(new_commit, hex);
     fprintf(f, "%s\n", hex);
-    
+
     fflush(f);
     fsync(fileno(f));
     fclose(f);
-    
+
     return rename(tmp_path, target_path);
 }
 
@@ -195,8 +201,43 @@ int head_update(const ObjectID *new_commit) {
 //
 // Returns 0 on success, -1 on error.
 int commit_create(const char *message, ObjectID *commit_id_out) {
-    // TODO: Implement commit creation
-    // (See Lab Appendix for logical steps)
-    (void)message; (void)commit_id_out;
-    return -1;
+    ObjectID tree_id;
+    if (tree_from_index(&tree_id) != 0) return -1;
+
+    Commit c;
+    memset(&c, 0, sizeof(Commit));
+
+    c.tree = tree_id;
+
+    if (head_read(&c.parent) == 0) {
+        c.has_parent = 1;
+    } else {
+        c.has_parent = 0;
+    }
+
+    snprintf(c.author, sizeof(c.author), "%s", pes_author());
+    c.timestamp = (uint64_t)time(NULL);
+    snprintf(c.message, sizeof(c.message), "%s", message);
+
+    void *data;
+    size_t len;
+
+    if (commit_serialize(&c, &data, &len) != 0) return -1;
+
+    if (object_write(OBJ_COMMIT, data, len, commit_id_out) != 0) {
+        free(data);
+        return -1;
+    }
+
+    free(data);
+
+    if (head_update(commit_id_out) != 0) {
+        return -1;
+    }
+
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(commit_id_out, hex);
+    printf("[%s] %s\n", hex, message);
+
+    return 0;
 }
