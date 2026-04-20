@@ -10,8 +10,8 @@
 //   "100644 hello.txt\0" followed by 32 raw bytes of SHA-256
 
 // tree.c — Tree object serialization and construction
-#include "tree.h"
-#include "index.h"
+#include <tree.h>
+#include <index.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
