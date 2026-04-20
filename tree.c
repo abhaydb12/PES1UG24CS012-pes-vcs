@@ -10,8 +10,9 @@
 //   "100644 hello.txt\0" followed by 32 raw bytes of SHA-256
 
 // tree.c — Tree object serialization and construction
+// tree.c — Tree object serialization and construction
 #include "tree.h"
-#include <index.h>
+#include "index.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,9 +20,8 @@
 #include <sys/stat.h>
 #include <errno.h>
 
-// Forward declarations
+// Forward declaration — object_write is in object.c
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
-int index_load(Index *index);
 
 // ─── Mode Constants ──────────────────────────────────────────────────────────
 #define MODE_FILE 0100644
@@ -103,12 +103,40 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 
 // ─── IMPLEMENTED ─────────────────────────────────────────────────────────────
 
+// Read the index file directly — avoids depending on index.c at link time
+static int load_index_internal(Index *index) {
+    index->count = 0;
+    FILE *f = fopen(INDEX_FILE, "r");
+    if (!f) return 0;  // No index yet — not an error
+
+    char line[700];
+    while (fgets(line, sizeof(line), f)) {
+        if (index->count >= MAX_INDEX_ENTRIES) break;
+        IndexEntry *e = &index->entries[index->count];
+
+        char hex[HASH_HEX_SIZE + 1];
+        unsigned long long mtime;
+        unsigned int size;
+        unsigned int mode;
+
+        int n = sscanf(line, "%o %64s %llu %u %511s",
+                       &mode, hex, &mtime, &size, e->path);
+        if (n != 5) continue;
+
+        e->mode      = mode;
+        e->mtime_sec = mtime;
+        e->size      = size;
+        if (hex_to_hash(hex, &e->hash) != 0) continue;
+        index->count++;
+    }
+    fclose(f);
+    return 0;
+}
+
 static int cmp_entry_ptrs(const void *a, const void *b) {
     return strcmp((*(IndexEntry **)a)->path, (*(IndexEntry **)b)->path);
 }
 
-// Recursive helper: builds a tree for entries under `prefix`
-// e.g. prefix="" for root, prefix="src/" for the src subdirectory
 static int write_tree_level(IndexEntry **entries, int count,
                              const char *prefix, ObjectID *id_out) {
     Tree tree;
@@ -117,12 +145,11 @@ static int write_tree_level(IndexEntry **entries, int count,
 
     int i = 0;
     while (i < count) {
-        // Path relative to current directory level
-        const char *rel = entries[i]->path + prefix_len;
+        const char *rel   = entries[i]->path + prefix_len;
         const char *slash = strchr(rel, '/');
 
         if (!slash) {
-            // Plain file at this level — add as blob entry
+            // Plain file at this level
             TreeEntry *te = &tree.entries[tree.count++];
             te->mode = entries[i]->mode;
             strncpy(te->name, rel, sizeof(te->name) - 1);
@@ -130,41 +157,39 @@ static int write_tree_level(IndexEntry **entries, int count,
             te->hash = entries[i]->hash;
             i++;
         } else {
-            // Subdirectory — get its name
+            // Subdirectory — collect its name
             size_t dir_len = (size_t)(slash - rel);
             char dir_name[256];
-            strncpy(dir_name, rel, dir_len);
+            memcpy(dir_name, rel, dir_len);
             dir_name[dir_len] = '\0';
 
-            // Build prefix for recursive call e.g. "src/"
+            // New prefix e.g. "src/"
             char new_prefix[512];
             snprintf(new_prefix, sizeof(new_prefix), "%s%s/", prefix, dir_name);
             size_t new_prefix_len = strlen(new_prefix);
 
-            // Collect all entries that belong to this subdirectory
+            // Collect all entries under this subdir
             int j = i;
             while (j < count &&
                    strncmp(entries[j]->path, new_prefix, new_prefix_len) == 0) {
                 j++;
             }
 
-            // Recurse into subdirectory
+            // Recurse
             ObjectID sub_id;
             if (write_tree_level(entries + i, j - i, new_prefix, &sub_id) != 0)
                 return -1;
 
-            // Add subtree entry
             TreeEntry *te = &tree.entries[tree.count++];
             te->mode = MODE_DIR;
-            strncpy(te->name, dir_name, sizeof(te->name) - 1);
-            te->name[sizeof(te->name) - 1] = '\0';
+            memcpy(te->name, dir_name, dir_len);
+            te->name[dir_len] = '\0';
             te->hash = sub_id;
 
             i = j;
         }
     }
 
-    // Serialize and write this tree to the object store
     void *tdata;
     size_t tlen;
     if (tree_serialize(&tree, &tdata, &tlen) != 0) return -1;
@@ -175,10 +200,8 @@ static int write_tree_level(IndexEntry **entries, int count,
 
 int tree_from_index(ObjectID *id_out) {
     Index index;
-    index.count = 0;
-    index_load(&index);  // empty index is fine (first commit)
+    load_index_internal(&index);  // reads .pes/index directly, no index.c needed
 
-    // Sort entries by path
     IndexEntry *ptrs[MAX_INDEX_ENTRIES];
     for (int i = 0; i < index.count; i++)
         ptrs[i] = &index.entries[i];
